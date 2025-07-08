@@ -29,12 +29,14 @@ func main() {
 }
 func matchingEngine(text []byte, pattern string) bool {
 	if len(pattern) > 1 && pattern[0] == '^' {
+		// match at beginning
 		if matchLoc(pattern[1:], text) {
 			return true
 		}
 
 	}
 	for i := 0; i <= len(text); i++ {
+		// iteratively attempt to match at each location
 		if matchLoc(pattern, text[i:]) {
 			return true
 		}
@@ -56,6 +58,9 @@ func matchLoc(pattern string, text []byte) bool {
 		}
 		if pattern[1] == '+' {
 			return matchPlus(pattern[0], pattern[2:], text)
+		}
+		if pattern[1] == '?' {
+			return matchQuestionMark(pattern[0], pattern[2:], text)
 		}
 		if pattern[0] == '[' {
 			if pattern[1] == '^' {
@@ -159,6 +164,19 @@ func matchCharacterGroup(pattern string, text []byte) bool {
 		characterGroup += string(pattern[i]) // build character group
 		i++
 
+	}
+	return false
+}
+func matchQuestionMark(c byte, patternAfterQuestion string, text []byte) bool {
+	// match 0 occurrences
+	if matchLoc(patternAfterQuestion, text) {
+		return true
+	}
+	if len(text) > 0 && (c == '.' || c == text[0]) {
+		// match 1 occurrence
+		if matchLoc(patternAfterQuestion, text[1:]) {
+			return true
+		}
 	}
 	return false
 }
