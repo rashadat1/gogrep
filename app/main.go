@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -249,4 +250,81 @@ func matchStarNegCharGroup(negCharacterGroup string, patternAfterStar string, te
 		i++
 	}
 	return false
+}
+func topLevelAlternationSplit(pattern string) ([]string, error) {
+	parenthLevel := 0
+	parts := make([]string, 0)
+	for i, char := range pattern {
+		switch char {
+		case '(':
+			parenthLevel++
+		case ')':
+			if parenthLevel == 0 {
+				return nil, errors.New("Unmatched Parenthesis braces")
+			}
+			parenthLevel--
+		case '|':
+			if parenthLevel == 0 {
+				l := pattern[:i]
+				r := pattern[i+utf8.RuneLen(char):]
+				leftParts, err1 := topLevelAlternationSplit(l)
+				rightParts, err2 := topLevelAlternationSplit(r)
+				if err1 != nil || err2 != nil {
+					return nil, errors.New(err1.Error() + err2.Error())
+				}
+				parts = append(parts, leftParts...)
+				parts = append(parts, rightParts...)
+				return parts, nil
+			}
+		}
+	}
+	return []string{pattern}, nil
+}
+func evalAlt(pattern string) [][]string {
+	// called exclusively on alt options returned by topLevelAlternationSplit that contain '|'
+	// this will be parts with '|' inside ()
+	prefix := "" // before alternation group
+	resElement := ""
+	inAlternationGroup := false
+	group := make([]string, 0)
+	res := make([][]string, 0)
+	for _, char := range pattern {
+		switch {
+		case char == '(':
+			inAlternationGroup = true
+		case char == '|':
+			group = append(group, prefix+resElement) // characters outside alternation group and the alternation group up to |
+			resElement = ""                          // make empty because the characters between ( and | are already added now
+		case char == ')':
+			if inAlternationGroup {
+				inAlternationGroup = false
+			}
+			if len(resElement) > 0 {
+				group = append(group, prefix+resElement) // if we have accumulated any more elements since the last |
+			}
+			resElement = ""
+			prefix = ""
+			res = append(res, group)
+			group = []string{} // start over because we are finished with this alternation group
+		default:
+			if !inAlternationGroup {
+				prefix = prefix + string(char)
+			} else {
+				resElement = resElement + string(char)
+			}
+		}
+	}
+	if len(group) > 0 {
+		// in this case there are no parentheses I think this is redundant as we are only parsing stuff that has '|' within () and we know the parens are valid
+		// so this should never happen
+		res = append(res, group)
+	}
+	if len(prefix) > 0 && len(res) > 0 {
+		suffix := prefix
+		// there is a non-alternating group suffix we need to add
+		for i, altGroup := range res[len(res)-1] {
+			res[len(res)-1][i] = altGroup + suffix
+		}
+	}
+	return res
 }
