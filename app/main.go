@@ -22,11 +22,40 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error reading input text: %v\n", err)
 		os.Exit(2)
 	}
-	ok := matchingEngine(toSearchBytes, pattern)
-	if !ok {
-		// no match
-		os.Exit(1)
+	altParts, err := topLevelAlternationSplit(pattern)
+	if err != nil {
+		fmt.Printf("%v\n", err)
+		os.Exit(2)
 	}
+	/*
+		for _, sub := range altParts {
+			if strings.Contains(sub, "|") {
+				altGroups, err := evalAltNested(sub)
+				if err != nil {
+					fmt.Printf("%v\n", err)
+					os.Exit(2)
+				}
+				for _, subPat := range altGroups {
+					ok := matchingEngine(toSearchBytes, subPat)
+					if ok {
+						os.Exit(0)
+					}
+				}
+			} else {
+				ok := matchingEngine(toSearchBytes, sub)
+				if ok {
+					os.Exit(0)
+				}
+			}
+		}
+	*/
+	for _, sub := range altParts {
+		ok := matchingEngine(toSearchBytes, sub)
+		if ok {
+			os.Exit(0)
+		}
+	}
+	os.Exit(1)
 }
 func matchingEngine(text []byte, pattern string) bool {
 	if len(pattern) > 1 && pattern[0] == '^' {
@@ -69,6 +98,23 @@ func matchLoc(pattern string, text []byte) bool {
 			}
 			return matchCharacterGroup(pattern[1:], text)
 		}
+		if pattern[0] == '(' {
+			group, after, ok := extractGroupAndRest(pattern)
+			if !ok {
+				return false
+			}
+			if len(after) > 0 {
+				switch after[0] {
+				case '*':
+					return matchStarGroup(group, after[1:], text)
+				case '+':
+					return matchPlusGroup(group, after[1:], text)
+				case '?':
+					return matchQuestionGroup(group, after[1:], text)
+				}
+			}
+			return matchGroup(group, after, text)
+		}
 	}
 	if len(text) > 0 {
 		if pattern[0] == '.' {
@@ -83,6 +129,72 @@ func matchLoc(pattern string, text []byte) bool {
 	}
 	return false
 
+}
+func splitAlternatives(group string) []string {
+	var result []string
+	start := 0
+	depth := 0
+	for i := 0; i < len(group); i++ {
+		switch {
+		case group[i] == '(':
+			depth++
+		case group[i] == ')':
+			depth--
+		case group[i] == '|':
+			if depth == 0 {
+				result = append(result, group[start:i])
+				start = i + 1
+			}
+		}
+	}
+	result = append(result, group[start:])
+	return result
+}
+func matchGroup(group, after string, text []byte) bool {
+	alternatives := splitAlternatives(group)
+	for _, alt := range alternatives {
+		combined := alt + after
+		if matchLoc(combined, text) {
+			return true
+		}
+	}
+	return false
+}
+func matchGroupOnce(group string, text []byte) (bool, int) {
+	alternatives := splitAlternatives(group)
+	for _, alt := range alternatives {
+		for i := 0; i <= len(text); i++ {
+			if matchLoc(alt, text[:i]) {
+				return true, i
+			}
+		}
+	}
+	return false, 0
+}
+func matchPlusGroup(group, after string, text []byte) bool {
+	for i := 1; i <= len(text); i++ {
+		if matchGroup(group, after, text[i:]) {
+			return true
+		}
+	}
+}
+func extractGroupAndRest(pattern string) (string, string, bool) {
+	if len(pattern) == 0 || pattern[0] != '(' {
+		return "", "", false
+	}
+	depth := 0
+	for i := 0; i < len(pattern); i++ {
+		switch pattern[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return pattern[1:i], pattern[i+1:], true
+			}
+		}
+	}
+	return "", "", false
 }
 func matchCharWithRune(pattern string, r rune) (bool, int) {
 	switch {
@@ -260,7 +372,7 @@ func topLevelAlternationSplit(pattern string) ([]string, error) {
 			parenthLevel++
 		case ')':
 			if parenthLevel == 0 {
-				return nil, errors.New("Unmatched Parenthesis braces")
+				return nil, errors.New("unmatched parenthesis braces")
 			}
 			parenthLevel--
 		case '|':
@@ -324,6 +436,85 @@ func evalAlt(pattern string) [][]string {
 		// there is a non-alternating group suffix we need to add
 		for i, altGroup := range res[len(res)-1] {
 			res[len(res)-1][i] = altGroup + suffix
+		}
+	}
+	return res
+}
+func evalAltNested(pattern string) ([]string, error) {
+	var parts [][]string
+	i := 0
+	for i < len(pattern) {
+		switch {
+		case pattern[i] == '(':
+			j, err := findMatchingParenth(pattern, i)
+			if err != nil {
+				return nil, err
+			}
+			groupContent := pattern[i+1 : j]
+			groupOpts := []string{}
+			alts, err := topLevelAlternationSplit(groupContent)
+			if err != nil {
+				return nil, err
+			}
+			for _, alt := range alts {
+				opt, err := evalAltNested(alt)
+				if err != nil {
+					return nil, err
+				}
+				groupOpts = append(groupOpts, opt...)
+			}
+			parts = append(parts, groupOpts)
+			i = j + 1
+		case pattern[i] == '|':
+			return nil, errors.New("unexpected | outside parenthesis")
+		default:
+			start := i
+			for i < len(pattern) && pattern[i] != '(' && pattern[i] != ')' {
+				i++
+			}
+			literal := pattern[start:i]
+			parts = append(parts, []string{literal})
+		}
+	}
+	return cartesianProduct(parts), nil
+}
+func findMatchingParenth(s string, start int) (int, error) {
+	level := 0
+	for i := start; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			level++
+		case ')':
+			level--
+			if level == 0 {
+				return i, nil
+			}
+		}
+	}
+	return -1, errors.New("unmatched '('")
+}
+func cartesianProduct(altGroups [][]string) []string {
+	if len(altGroups) == 0 {
+		return []string{}
+	}
+	if len(altGroups) == 1 {
+		// only one alternating group
+		return altGroups[0]
+	}
+	prev := altGroups[0]
+	for i := 1; i < len(altGroups); i++ {
+		if len(altGroups[i]) != 0 {
+			prev = productCalc(prev, altGroups[i])
+
+		}
+	}
+	return prev
+}
+func productCalc(x, y []string) []string {
+	res := make([]string, 0)
+	for _, elx := range x {
+		for _, ely := range y {
+			res = append(res, elx+ely)
 		}
 	}
 	return res
