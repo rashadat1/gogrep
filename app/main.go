@@ -269,6 +269,41 @@ func matchCharacterGroupWithConsumption(pattern string, text []byte) (bool, int)
 	}
 	return false, 0
 }
+func matchStarCharGroupWithConsumption(group string, pattern string, text []byte) (bool, int) {
+	i := 0
+	for {
+		matched, consumed := matchLocWithConsumption(pattern, text[i:])
+		if matched {
+			return true, consumed + i
+		}
+		if len(text) <= i || !strings.Contains(group, string(text[i])) {
+			break
+		}
+		i++
+	}
+	return false, 0
+}
+func matchPlusCharGroupWithConsumption(group string, pattern string, text []byte) (bool, int) {
+	i := 0
+	for {
+		if i == 0 && !strings.Contains(group, string(text[0])) {
+			break
+		}
+		if i > 0 {
+			matched, consumed := matchLocWithConsumption(pattern, text[i:])
+			if matched {
+				return true, consumed + i
+			}
+			if len(text) <= i || !strings.Contains(group, string(text[0])) {
+				break
+			}
+		}
+	}
+	return false, 0
+}
+func matchNegativeCharacterGroupWithConsumption(pattern string, text []byte) (bool, int) {
+
+}
 func splitAlternatives(group string) []string {
 	var result []string
 	start := 0
