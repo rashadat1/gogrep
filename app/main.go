@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -42,28 +43,61 @@ func matchBackReference(groupNumSearch int, text []byte, afterBackRef string) (b
 }
 func main() {
 	// usage echo <input_string> | ./gogrep -E <pattern>
+	filePath := ""
+	useFile := false
+	var input *os.File
 	if len(os.Args) < 3 || os.Args[1] != "-E" {
 		// exit with code 2 on error
 		os.Exit(2)
 	}
 	pattern := os.Args[2]
-	toSearchBytes, err := io.ReadAll(os.Stdin)
+	if len(os.Args) == 4 {
+		filePath = os.Args[3]
+		_, err := os.Stat(filePath)
+		if os.IsNotExist(err) {
+			fmt.Printf("File at file_path <%s> does not exist\n", filePath)
+			os.Exit(2)
+		}
+		if err != nil {
+			fmt.Printf("Error processing file_path <%s>: %s\n", filePath, err)
+			os.Exit(2)
+		}
+		input, err = os.Open(filePath)
+		if err != nil {
+			fmt.Printf("Error opening file at file_path <%s>: %s\n", filePath, err)
+		}
+		useFile = true
+
+	}
+	if !useFile {
+		input = os.Stdin
+	}
+	toSearchBytes, err := io.ReadAll(input)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error reading input text: %v\n", err)
 		os.Exit(2)
 	}
+	separatedLines := bytes.Split(toSearchBytes, []byte("\n"))
+	linesMatchingPattern := make([]string, 0)
 	altParts, err := topLevelAlternationSplit(pattern)
 	if err != nil {
 		fmt.Printf("%v\n", err)
 		os.Exit(2)
 	}
 	for _, sub := range altParts {
-		ok := matchingEngine(toSearchBytes, sub)
-		if ok {
-			os.Exit(0)
+		for _, line := range separatedLines {
+			ok := matchingEngine(line, sub)
+			if ok {
+				linesMatchingPattern = append(linesMatchingPattern, string(line))
+			}
 		}
 	}
-	os.Exit(1)
+	if len(linesMatchingPattern) == 0 {
+		os.Exit(1)
+	}
+	for i := 0; i < len(linesMatchingPattern); i++ {
+		fmt.Println(linesMatchingPattern[i])
+	}
 }
 func matchingEngine(text []byte, pattern string) bool {
 	globCaptureContext = newCaptureContext()
@@ -139,14 +173,7 @@ func matchLocWithConsumption(pattern string, text []byte) (bool, int) {
 					return matchQuestionGroupWithConsumption(group, after[1:], text, currGroupNum)
 				}
 			}
-			matched, consumed := matchGroupOnce(group, text, currGroupNum)
-			if matched {
-				afterMatched, afterConsumed := matchLocWithConsumption(after, text[consumed:])
-				if afterMatched {
-					return true, afterConsumed + consumed
-				}
-			}
-			return false, 0
+			return matchGroupWithBacktracking(group, after, text, currGroupNum)
 		}
 	}
 	if len(text) > 0 {
@@ -334,9 +361,9 @@ func matchStarWithConsumption(c byte, patternAfterStar string, text []byte) (boo
 	}
 	// once we finish - begin the backtrack
 	for j := i; j >= 0; j-- {
-		matched, consumed := matchLocWithConsumption(patternAfterStar, text[i:])
+		matched, consumed := matchLocWithConsumption(patternAfterStar, text[j:])
 		if matched {
-			return true, i + consumed
+			return true, j + consumed
 		}
 	}
 	return false, 0
@@ -507,7 +534,10 @@ func matchPlusNegCharGroupWithConsumption(negGroup, patternAfter string, text []
 	for i < len(text) && !strings.Contains(negGroup, string(text[i])) {
 		i++
 	}
-	for j := i; j >= 0; j-- {
+	if patternAfter == "" {
+		return true, i
+	}
+	for j := i; j >= 1; j-- {
 		matched, consumed := matchLocWithConsumption(patternAfter, text[j:])
 		if matched {
 			return true, consumed + j
@@ -535,15 +565,56 @@ func splitAlternatives(group string) []string {
 	result = append(result, group[start:])
 	return result
 }
+func matchGroupWithBacktracking(group, after string, text []byte, groupNum int) (bool, int) {
+	// special handling for negative char groups with + quantifier
+	if strings.HasPrefix(group, "[^") && strings.HasSuffix(group, "+") {
+		// extract the negative character set
+		closeBracket := strings.Index(group[2:], "]")
+		if closeBracket == -1 {
+			return false, 0
+		}
+		negCharSet := group[2 : closeBracket+2]
+		// find max consumption
+		if len(text) == 0 || strings.Contains(negCharSet, string(text[0])) {
+			return false, 0
+		}
+		maxConsume := 1
+		for maxConsume < len(text) && !strings.Contains(negCharSet, string(text[maxConsume])) {
+			maxConsume++
+		}
+
+		for consume := maxConsume; consume >= 1; consume-- {
+			globCaptureContext.captures[groupNum] = string(text[:consume])
+			afterMatched, afterConsumed := matchLocWithConsumption(after, text[consume:])
+			if afterMatched {
+				return true, afterConsumed + consume
+			}
+		}
+		return false, 0
+
+	}
+	// regular group matching
+	matched, consumed := matchGroupOnce(group, text, groupNum)
+	if matched {
+		afterMatched, afterConsumed := matchLocWithConsumption(after, text[consumed:])
+		if afterMatched {
+			return true, consumed + afterConsumed
+		}
+	}
+	return false, 0
+}
 func matchGroupOnce(group string, text []byte, groupNum int) (bool, int) {
 	alternatives := splitAlternatives(group)
 	for _, alt := range alternatives {
-		// just try to match the alternative by starting at the current position
+		// save the current group number context before recursive matching
+		savedGroupNum := globCaptureContext.groupNum
 		matched, consumed := matchLocWithConsumption(alt, text)
 		if matched {
 			globCaptureContext.captures[groupNum] = string(text[:consumed])
 			return true, consumed
 		}
+		// restore the group number context if matching failed
+		globCaptureContext.groupNum = savedGroupNum
 	}
 	return false, 0
 }
