@@ -26,7 +26,6 @@ func newCaptureContext() *CaptureContext {
 }
 func matchBackReference(groupNumSearch int, text []byte, afterBackRef string) (bool, int) {
 	captured, ok := globCaptureContext.captures[groupNumSearch]
-	fmt.Printf("Captured group that is referred to: %s\n", captured)
 	if !ok {
 		return false, 0
 	}
@@ -34,10 +33,7 @@ func matchBackReference(groupNumSearch int, text []byte, afterBackRef string) (b
 		return false, 0
 	}
 	if string(text[:len(captured)]) == captured {
-		fmt.Printf("We have this is the subset of the text: %s\n", text[:len(captured)])
 		matched, consumed := matchLocWithConsumption(afterBackRef, text[len(captured):])
-		fmt.Printf("After backreference: %s\n", afterBackRef)
-		fmt.Printf("Pattern after backreference: %s\n", string(text[len(captured):]))
 		if matched {
 			return true, len(captured) + consumed
 		}
@@ -133,13 +129,15 @@ func matchLocWithConsumption(pattern string, text []byte) (bool, int) {
 			}
 			globCaptureContext.groupNum++
 			currGroupNum := globCaptureContext.groupNum
-			switch after[0] {
-			case '*':
-				return matchStarGroupWithConsumption(group, after[1:], text, currGroupNum)
-			case '+':
-				return matchPlusGroupWithConsumption(group, after[1:], text, currGroupNum)
-			case '?':
-				return matchQuestionGroupWithConsumption(group, after[1:], text, currGroupNum)
+			if len(after) >= 1 {
+				switch after[0] {
+				case '*':
+					return matchStarGroupWithConsumption(group, after[1:], text, currGroupNum)
+				case '+':
+					return matchPlusGroupWithConsumption(group, after[1:], text, currGroupNum)
+				case '?':
+					return matchQuestionGroupWithConsumption(group, after[1:], text, currGroupNum)
+				}
 			}
 			matched, consumed := matchGroupOnce(group, text, currGroupNum)
 			if matched {
@@ -202,58 +200,56 @@ func matchStarCharClassWithConsumption(wholePattern, patternAfter string, text [
 	}
 }
 func matchPlusCharClassWithConsumption(wholePattern, patternAfter string, text []byte) (bool, int) {
-	i := 0
-	for {
-		if i == 0 {
-			switch {
-			case strings.HasPrefix(wholePattern, "\\d"):
-				r, size := utf8.DecodeRuneInString(string(text[i:]))
-				if !unicode.IsDigit(r) {
-					return false, 0
-				}
-				i += size
-			case strings.HasPrefix(wholePattern, "\\w"):
-				r, size := utf8.DecodeRuneInString(string(text[i:]))
-				if !(r >= 'A' && r <= 'Z') &&
-					!(r >= 'a' && r <= 'z') &&
-					!(r >= '0' && r <= '9') &&
-					r != '_' {
-					return false, 0
-				}
-				i += size
-			default:
-				return false, 0
-			}
+	matchHelper := func(data []byte, offset int) (bool, int) {
+		if offset >= len(data) {
+			return false, 0
 		}
-		if i > 0 {
-			if i >= len(text) {
-				return false, 0
-			}
-			matched, consumed := matchLocWithConsumption(patternAfter, text[i:])
-			if matched {
-				return true, consumed + i
-			}
-			switch {
-			case strings.HasPrefix(wholePattern, "\\d"):
-				r, size := utf8.DecodeRuneInString(string(text[i:]))
-				if !unicode.IsDigit(r) {
-					return false, 0
-				}
-				i += size
-			case strings.HasPrefix(wholePattern, "\\w"):
-				r, size := utf8.DecodeRuneInString(string(text[i:]))
-				if !(r >= 'A' && r <= 'Z') &&
-					!(r >= 'a' && r <= 'z') &&
-					!(r >= '0' && r <= '9') &&
-					r != '_' {
-					return false, 0
-				}
-				i += size
-			default:
-				return false, 0
-			}
+		r, size := utf8.DecodeRuneInString(string(data[offset:]))
+		switch {
+		case strings.HasPrefix(wholePattern, "\\d"):
+			return unicode.IsDigit(r), size
+		case strings.HasPrefix(wholePattern, "\\w"):
+			return (r >= 'A' && r <= 'Z') ||
+				(r >= 'a' && r <= 'z') ||
+				(r >= '0' && r <= '9') ||
+				r == '_', size
+		default:
+			return false, 0
 		}
 	}
+	i := 0
+	// check if we match at least one character required for '+'
+	matches, size := matchHelper(text, 0)
+	if !matches {
+		return false, 0
+	}
+	i += size
+	// now consume as many characters as possible greedily
+	for {
+		matches, size := matchHelper(text, i)
+		if !matches {
+			break
+		}
+		i += size
+	}
+	// now we try to match from the point where we exit the loop - backtracking if need be
+	for j := i; j >= 1; {
+		matched, consumed := matchLocWithConsumption(patternAfter, text[j:])
+		if matched {
+			return true, consumed + j
+		}
+		if j == 1 {
+			// need to match at least one character
+			break
+		}
+		j--
+		for j > 0 && !utf8.RuneStart(text[j]) {
+			// while we are greater than 0 and we are not at a byte that could start a
+			// unicode character
+			j--
+		}
+	}
+	return false, 0
 }
 func matchQuestionCharClassWithConsumption(wholePattern, patternAfter string, text []byte) (bool, int) {
 	switch {
@@ -330,41 +326,35 @@ func matchQuestionGroupWithConsumption(group, after string, text []byte, groupNu
 	return false, 0
 }
 func matchStarWithConsumption(c byte, patternAfterStar string, text []byte) (bool, int) {
-	// match 0 or more occurrences of byte c -> at each step check if we match the rest of the pattern
-	// break if we reach i past the length of text without matching the remaining text or if c does not match
-	// the text anymore
+	// match 0 or more occurrences of byte c
 	i := 0
-	for {
+	// consume as many characters as we can greedily
+	for i < len(text) && (c == '.' || c == text[i]) {
+		i++
+	}
+	// once we finish - begin the backtrack
+	for j := i; j >= 0; j-- {
 		matched, consumed := matchLocWithConsumption(patternAfterStar, text[i:])
 		if matched {
 			return true, i + consumed
 		}
-		if len(text) <= i || (c != '.' && c != text[i]) {
-			break
-		}
-		i++
 	}
 	return false, 0
 }
 func matchPlusWithConsumption(c byte, patternAfterPlus string, text []byte) (bool, int) {
 	// match one or more occurrence
 	i := 0
-	for {
-		if i == 0 && (len(text) < 1 || (c != '.' && c != text[i])) {
-			// check if matches 1 occurrence at beginning of text
-			break
-		}
-		if i > 0 {
-			matched, numConsumed := matchLocWithConsumption(patternAfterPlus, text[i:])
-			if matched {
-				return true, numConsumed + i
-			}
-
-			if len(text) <= i || (c != '.' && c != text[i]) {
-				break
-			}
-			i++
-
+	if len(text) < 1 || (c != '.' && c != text[i]) {
+		return false, 0
+	}
+	i++
+	for i < len(text) && (c == '.' || c == text[i]) {
+		i++
+	}
+	for j := i; j >= 1; j-- {
+		matched, consumed := matchLocWithConsumption(patternAfterPlus, text[j:])
+		if matched {
+			return true, consumed + j
 		}
 	}
 	return false, 0
@@ -438,20 +428,23 @@ func matchStarCharGroupWithConsumption(group string, pattern string, text []byte
 }
 func matchPlusCharGroupWithConsumption(group, pattern string, text []byte) (bool, int) {
 	i := 0
-	for {
-		if i == 0 && !strings.Contains(group, string(text[0])) {
-			break
-		}
-		if i > 0 {
-			matched, consumed := matchLocWithConsumption(pattern, text[i:])
-			if matched {
-				return true, consumed + i
-			}
-			if len(text) <= i || !strings.Contains(group, string(text[0])) {
-				break
-			}
-		}
+	// First, ensure we match at least one character
+	if len(text) == 0 || !strings.Contains(group, string(text[0])) {
+		return false, 0
+	}
+	i = 1
+
+	// Then consume as many characters as possible
+	for i < len(text) && strings.Contains(group, string(text[i])) {
 		i++
+	}
+
+	// Now try to match the rest of the pattern, backtracking if necessary
+	for j := i; j >= 1; j-- {
+		matched, consumed := matchLocWithConsumption(pattern, text[j:])
+		if matched {
+			return true, consumed + j
+		}
 	}
 	return false, 0
 }
