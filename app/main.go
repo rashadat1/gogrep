@@ -43,54 +43,97 @@ func matchBackReference(groupNumSearch int, text []byte, afterBackRef string) (b
 }
 func main() {
 	// usage echo <input_string> | ./gogrep -E <pattern>
-	filePath := ""
+	var pattern string
 	useFile := false
-	var input *os.File
-	if len(os.Args) < 3 || os.Args[1] != "-E" {
-		// exit with code 2 on error
+	files := make(map[string]*os.File, 0)
+	recursive := false
+	if len(os.Args) < 3 {
+		fmt.Fprintf(os.Stderr, "Error: Not enough arguments")
 		os.Exit(2)
 	}
-	pattern := os.Args[2]
-	if len(os.Args) == 4 {
-		filePath = os.Args[3]
-		_, err := os.Stat(filePath)
-		if os.IsNotExist(err) {
-			fmt.Printf("File at file_path <%s> does not exist\n", filePath)
+	if os.Args[1] == "-r" {
+		recursive = true
+	}
+	if !recursive && os.Args[1] != "-E" {
+		fmt.Fprintf(os.Stderr, "Error: Missing required parameter -E")
+		os.Exit(2)
+	}
+	if recursive {
+		if os.Args[2] != "-E" {
+			fmt.Fprintf(os.Stderr, "Error: Missing required parameter -E")
 			os.Exit(2)
 		}
-		if err != nil {
-			fmt.Printf("Error processing file_path <%s>: %s\n", filePath, err)
-			os.Exit(2)
-		}
-		input, err = os.Open(filePath)
-		if err != nil {
-			fmt.Printf("Error opening file at file_path <%s>: %s\n", filePath, err)
+	}
+	start := 0
+	if recursive {
+		pattern = os.Args[3]
+		start = 4
+	} else {
+		pattern = os.Args[2]
+		start = 3
+	}
+	if len(os.Args) >= 4 {
+		for j := start; j < len(os.Args); j++ {
+			fileName := os.Args[j]
+			fileInfo, err := os.Stat(fileName)
+			if os.IsNotExist(err) {
+				fmt.Fprintf(os.Stderr, "File at file_path <%s> does not exist\n", fileName)
+				os.Exit(2)
+			}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error processing file_path <%s>: %s\n", fileName, err)
+				os.Exit(2)
+			}
+			if !fileInfo.IsDir() {
+				fileObj, err := os.Open(fileName)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error opening file at file_path <%s>: %s\n", fileName, err)
+					os.Exit(2)
+				}
+				files[fileName] = fileObj
+			} else {
+				// file path is a directory - in which case we need to recursively add the files in the subdirectories
+				dirPath := fileName
+				files, err = getFilesRecursively(dirPath, files)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error retrieving files in recursive call: %s\n", err)
+					os.Exit(2)
+				}
+			}
+
 		}
 		useFile = true
-
 	}
 	if !useFile {
-		input = os.Stdin
+		files["os.stdin"] = os.Stdin
 	}
-	toSearchBytes, err := io.ReadAll(input)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading input text: %v\n", err)
-		os.Exit(2)
-	}
-	separatedLines := bytes.Split(toSearchBytes, []byte("\n"))
 	linesMatchingPattern := make([]string, 0)
-	altParts, err := topLevelAlternationSplit(pattern)
-	if err != nil {
-		fmt.Printf("%v\n", err)
-		os.Exit(2)
-	}
-	for _, sub := range altParts {
-		for _, line := range separatedLines {
-			ok := matchingEngine(line, sub)
-			if ok {
-				linesMatchingPattern = append(linesMatchingPattern, string(line))
+
+	for fileName, fileObj := range files {
+		toSearchBytes, err := io.ReadAll(fileObj)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading input text: %v\n", err)
+			os.Exit(2)
+		}
+		separatedLines := bytes.Split(toSearchBytes, []byte("\n"))
+		altParts, err := topLevelAlternationSplit(pattern)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(2)
+		}
+		for _, sub := range altParts {
+			for _, line := range separatedLines {
+				prefixedLine := string(line)
+				if len(files) > 1 {
+					prefixedLine = fileName + ":" + prefixedLine
+				}
+				ok := matchingEngine(line, sub)
+				if ok {
+					linesMatchingPattern = append(linesMatchingPattern, string(prefixedLine))
+				}
 			}
 		}
+
 	}
 	if len(linesMatchingPattern) == 0 {
 		os.Exit(1)
@@ -98,6 +141,29 @@ func main() {
 	for i := 0; i < len(linesMatchingPattern); i++ {
 		fmt.Println(linesMatchingPattern[i])
 	}
+}
+func getFilesRecursively(dirPath string, allFiles map[string]*os.File) (map[string]*os.File, error) {
+	files, err := os.ReadDir(dirPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading directory <%s> contents: %s", dirPath, err)
+	}
+	if !strings.HasSuffix(dirPath, "/") {
+		dirPath = dirPath + "/"
+	}
+	for _, file := range files {
+		dirElementPath := dirPath + file.Name()
+		if file.IsDir() {
+			allFiles, err = getFilesRecursively(dirElementPath, allFiles)
+		} else {
+			fileObj, err := os.Open(dirElementPath)
+			if err != nil {
+				return nil, err
+			}
+			allFiles[dirElementPath] = fileObj
+		}
+	}
+	return allFiles, nil
+
 }
 func matchingEngine(text []byte, pattern string) bool {
 	globCaptureContext = newCaptureContext()
